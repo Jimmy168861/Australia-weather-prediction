@@ -1,0 +1,608 @@
+---
+title: "AUS Weather Analysis"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, results = "markup")
+```
+
+# Summary
+This project foucses on predicting whether it will rain tomorrow based on the weather indicators today. Logistic regression, KNN, decision tree and random forest are utilized to perform the prediction. Besides, Linear regression is applied to predict rainfall. Autoregression is applied to test whether rainfall is a random walk.
+
+# Introduction
+[Weather forecasts are made by collecting quantitative data about the current state of the atmosphere at a given place and using meteorology to project how the atmosphere will change. The main variables of prediction of the weather are changes in barometric pressure, current weather conditions, and sky condition or cloud cover, weather forecasting now relies on computer-based models that take many atmospheric factors into account. Researchers will select the best possible forecast model based on model performance and knowledge of model biases. The use of ensembles and model consensus help narrow the error and pick the most likely outcome.](https://en.wikipedia.org/wiki/Weather_forecasting)
+
+Our group download the data set and we plan to try several models to analyze the following research questions.
+
+The dataset is from kaggle: https://www.kaggle.com/jsphyg/weather-dataset-rattle-package
+
+The meaning of each variable in this dataset:
+
+1. Date: The date of observation
+
+2. Location: The common name of the location of the weather station
+
+3. MinTemp: The minimum temperature in degrees celsius
+
+4. MaxTemp: The maximum temperature in degrees celsius
+
+5. Rainfall: The amount of rainfall recorded for the day in mm
+
+6. Evaporation: The so-called Class A pan evaporation (mm) in the 24 hours to 9am
+
+7. Sunshine: The number of hours of bright sunshine in the day.
+
+8. WindGustDir: The direction of the strongest wind gust in the 24 hours to midnight
+
+9. WindGustSpeed: The speed (km/h) of the strongest wind gust in the 24 hours to midnight
+
+10. WindDir9am: Direction of the wind at 9am
+
+11. WindDir3pm: Direction of the wind at 3pm
+
+12. WindSpeed9am: Wind speed (km/hr) averaged over 10 minutes prior to 9am
+
+13. WindSpeed3pm: Wind speed (km/hr) averaged over 10 minutes prior to 3pm
+
+14. Humidity9am: Humidity (percent) at 9am
+
+15. Humidity3pm: Humidity (percent) at 3pm
+
+16. Pressure9am: Atmospheric pressure (hpa) reduced to mean sea level at 9am
+
+17. Pressure3pm: Atmospheric pressure (hpa) reduced to mean sea level at 3pm
+
+18. Cloud9am: Fraction of sky obscured by cloud at 9am. This is measured in "oktas", which are a unit of eigths. It records how many eigths of the sky are obscured by cloud. A 0 measure indicates completely clear sky whilst an 8 indicates that it is completely overcast.
+
+19. Cloud3pm: Fraction of sky obscured by cloud (in "oktas": eighths) at 3pm. See Cload9am for a description of the values
+
+20. Temp9am: Temperature (degrees C) at 9am
+
+21. Temp3pm: Temperature (degrees C) at 3pm
+
+22. RainTodayBoolean: 1 if precipitation (mm) in the 24 hours to 9am exceeds 1mm, otherwise 0
+
+23. RISK_MM: The amount of next day rain in mm. Used to create response variable RainTomorrow. A kind of measure of the "risk".
+
+24. RainTomorrow is the target variable. Did it rain tomorrow?
+
+# Task and Question:
+Task1: Predict whether it will rain tomorrow
+
+Task2: Analyze the similarity of different locations in terms of weather
+
+Question: Is rainfall a random walk?
+
+# 1. Load Data
+```{r}
+Data <- read.csv("weatherAUS.csv",header = T, stringsAsFactors = F)
+```
+
+# 2. Data Preprocessing
+## 2.1. Check and Remove Missing Data
+```{r}
+Logical <- is.na(Data)
+NaNum <- colSums(Logical)
+TotalRows <- nrow(Data)
+print(c("Total Rows:",TotalRows))
+print("Number of NA in each column:")
+NaNum
+print("Propotion of NA in each column:")
+NaNum/TotalRows
+```
+As the result shown above, 42.78903% of column Evaporation is missing, this column should be removed. 47.69292% of column Sunshine is missing, this column should be removed. 37.7353316% of column Cloud9am is missing, this column should be removed. 40.1524688% of column Cloud3pm is missing, this column should be removed.
+
+After removed column Evaporation, Sunshine, Cloud9am, Cloud3pm, rows with missing data will also be removed.
+```{r}
+Data <- subset(Data, select = -c(Evaporation,Sunshine,Cloud9am,Cloud3pm))
+Data <- na.omit(Data)
+```
+
+## 2.2. Check Whether Samples are Balanced
+Have a view on the whole dataset:
+```{r}
+table(Data$RainTomorrow)
+prop.table(table(Data$RainTomorrow))
+barplot(table(Data$RainTomorrow))
+```
+
+Have a view on each location:
+```{r}
+AllSample_Loc <- table(Data$Location)
+RainTomorrow_Loc <- aggregate(RainTomorrow ~ Location, data = Data, function(x){sum(x=="Yes")})
+
+Loc <- match(names(AllSample_Loc),RainTomorrow_Loc[,1])
+RainTomorrow_Loc[Loc,"AllSample"] <- AllSample_Loc
+RainTomorrow_Loc[,"NoRainTomorrow"] <- t(diff(t(RainTomorrow_Loc[,-1])))
+
+YesNo_Loc <- RainTomorrow_Loc[,-match("AllSample",names(RainTomorrow_Loc))]
+YesNo_LocMat <- as.matrix(t(YesNo_Loc[,-1]))
+colnames(YesNo_LocMat) <- RainTomorrow_Loc[,1]
+barplot(YesNo_LocMat)
+```
+
+As the results shown above, the whole dataset is not balanced. Samples of each location are also not balanced. Since fitting an unbalanced dataset makes the fitted models more likely to have bias, technique bagging is used and the following data split is adopted:
+
+No-Dataset: 30% test, 70% train
+Note: when training, it may be possible that not all these 70% are used
+
+Yes-Dataset: test - same amount as in No-Dataset, train - randomly pick as many as in No-Dataset from those left
+
+## 2.3. Delete Outlier
+Delete outliers based on boxplot
+```{r}
+Logical <- sapply(Data,is.character)
+NotChrLoc <- which(!Logical)
+
+OutliersContainer <- list()
+OutLiersNumber <- as.data.frame(matrix(nrow = length(NotChrLoc), ncol = 2))
+for ( i in 1:length(NotChrLoc) ){
+    outliers <- boxplot(Data[,NotChrLoc[i]], plot=FALSE)$out
+    VarName <- names(Data)[NotChrLoc[i]]
+    OutliersContainer[[i]] <- outliers
+    OutLiersNumber[i,1] <- VarName
+    OutLiersNumber[i,2] <- length(outliers)
+}
+OutLiersNumber
+```
+
+As the result shown above, in terms of variable Rainfall and RISK_MM, samples labeled as outliers by boxplot are too much, but outliers should be too much. So outliers removing will not base on these two variables.
+
+```{r}
+Logical1 <- OutLiersNumber[,1] %in% c("Rainfall","RISK_MM")
+Logical2 <- OutLiersNumber[,2]!=0
+VarHasOutlier <- OutLiersNumber[(!Logical1) & Logical2,1]
+for ( i in 1:length(VarHasOutlier) ){
+    outliers <- boxplot(Data[,VarHasOutlier[i]], plot=FALSE)$out
+    if (length(outliers) != 0){
+        par(mfrow = c(1, 2))
+        boxplot(Data[,VarHasOutlier[i]])
+        title(VarHasOutlier[i])
+        Data<-Data[-which(Data[,VarHasOutlier[i]] %in% outliers),]
+        boxplot(Data[,VarHasOutlier[i]])
+        title(VarHasOutlier[i])
+    }
+}
+```
+
+## 2.4. Analysis Covariance
+```{r}
+library(corrplot)
+Data_corvariance <- Data
+Data_cor <- Data[,c(3:5,7,10:17)]
+res <- round(cor(Data_cor),2)
+corrplot.mixed(res,lower.col = "black", number.cex = .5)
+
+```
+
+## 2.5. Data Split
+### 2.5.1 Generate Testing Dataset
+```{r}
+set.seed(1)
+TrainRatio <- 0.7
+TestRatio <- 1-TrainRatio
+
+Logical <- sapply(Data,is.character)
+Data[,Logical] <- as.data.frame(lapply(Data[,Logical],as.factor))
+
+YesData <- Data[Data$RainTomorrow=="Yes",]
+NoData <- Data[Data$RainTomorrow=="No",]
+
+YesData_TestRow <- sample(1:nrow(YesData),ceiling(nrow(YesData)*TestRatio))
+NoData_TestRow <- sample(1:nrow(YesData),length(YesData_TestRow))
+TestData <- rbind(YesData[YesData_TestRow,],NoData[NoData_TestRow,])
+```
+
+### 2.5.2. Prepare for Training Sets
+```{r}
+set.seed(1)
+Yes_TrainCandidate <- YesData[-YesData_TestRow,]
+No_TrainCandidate <- NoData[-NoData_TestRow,]
+
+MinRateInTrain <- 0.6
+MinNumInTrain <- ceiling((nrow(YesData)-length(YesData_TestRow))*MinRateInTrain)
+RandomTimes <- 501
+TrainRowNum <- sample(MinNumInTrain:nrow(Yes_TrainCandidate),RandomTimes)
+
+YesTrainRows <- lapply(TrainRowNum,function(x){sample(1:nrow(Yes_TrainCandidate),x)})
+NoTrainRows <- lapply(TrainRowNum,function(x){sample(1:nrow(No_TrainCandidate),x)})
+```
+
+### 2.5.3. TrainData Generating Function
+```{r}
+GetTrainData <- function(i){
+    set.seed(i)
+    YesTrainData <- Yes_TrainCandidate[YesTrainRows[[i]],]
+    NoTrainData <- No_TrainCandidate[NoTrainRows[[i]],]
+    TrainData <- rbind(YesTrainData,NoTrainData)
+    NewRows <- sample(1:nrow(TrainData),nrow(TrainData))
+    TrainData <- TrainData[NewRows,]
+}
+```
+
+# 3. Fitting and Predicting
+In this section, different models are applied to predict whether it will rain tomorrow.
+
+## 3.1. Autoregression
+```{r}
+AllCity <- unique(Data$Location)
+DataCity1 <- Data[Data$Location==AllCity[1],]
+library(fBasics)
+tssrainfall= ts(DataCity1$Rainfall,frequency = 365,start = c(2008,12))
+plot(tssrainfall,xlab="year",ylab="rainfall")
+basicStats(DataCity1$Rainfall)
+acf(DataCity1$Rainfall,lag.max = 24)
+pacf(DataCity1$Rainfall,lag.max = 24)
+m1<-arima(DataCity1$Rainfall,order=c(1,0,0))
+Box.test(m1$residuals,lag = 12,type = "Ljung")
+pv=1-pchisq(32.357,10)
+pv
+
+m2<-arima(DataCity1$Rainfall,order = c(2,0,6),fixed = c(NA,NA,NA,NA,0,0,0,NA,NA))
+Box.test(m2$residuals,lag = 12,type = "Ljung")
+pv=1-pchisq(38.19,10)
+pv
+predict(m1,5)
+
+for (i in 1: 44){
+    print(mi<-arima(Data[Data$Location==AllCity[i],]$Rainfall,order=c(1,0,0)))
+    print(Box.test(mi$residuals,lag = 12,type = "Ljung"))
+}
+```
+
+## 3.2. Linear Regression
+After we look through the data, we find out that the Rainfall as the output cannot be negative. Therefore, the linear regression is not the appropriate model to answer the research questions because the output cannot be negative while linear regression could lead the result to be negative.
+
+## 3.3. Logistic Regression
+Train:
+```{r cache=TRUE, results='hide'}
+set.seed(1)
+RandomTimes_Glm <- RandomTimes
+AllGlm <- list()
+for ( i in 1:RandomTimes_Glm ){
+    TrainData <- GetTrainData(i)
+    TrainData <- subset(TrainData, select = -c(Date,RISK_MM))
+    
+    ThisGlm <- glm(RainTomorrow ~ .,TrainData,family = binomial)
+    AllGlm[[i]] <- ThisGlm
+    print(i)
+}
+```
+
+Predict:
+```{r results='hide'}
+AllGlmPred <- matrix(nrow = nrow(TestData), ncol = length(AllGlm))
+for ( i in 1:length(AllGlm) ){
+    GlmPred <- predict(AllGlm[[i]],TestData,type="response")
+    AllGlmPred[,i] <- (GlmPred>0.5)
+    print(i)
+}
+```
+
+Accuracy and Performance:
+```{r}
+GetPredAccuracy <- function(AllModelPred,RealLabel){
+    PredAccuracy <- matrix(nrow = ncol(AllModelPred), ncol = 1)
+    for (i in 1:ncol(AllModelPred)){
+        PredAccuracy[i] <- mean(AllModelPred[,i]==RealLabel)
+    }
+    PredAccuracy
+}
+
+GetAvePfmTable <- function(AllModelPred,RealLabel){
+    Pred <- AllModelPred[,1]
+    PredTable_Ave <- table(Pred,RealLabel)
+    for (i in 2:ncol(AllModelPred)){
+        Pred <- AllModelPred[,i]
+        PredTable_Ave <- PredTable_Ave + table(Pred,RealLabel)
+    }
+    PredTable_Ave <- PredTable_Ave/ncol(AllModelPred)
+    PredTable_Ave
+}
+
+TestRainTomorrow <- TestData$RainTomorrow
+TestRainTomorrow <- (TestData$RainTomorrow=="Yes")
+
+AllGlmPredAccuracy <- GetPredAccuracy(AllGlmPred,TestRainTomorrow)
+hist(AllGlmPredAccuracy)
+GlmPredTable_Ave <- GetAvePfmTable(AllGlmPred,TestRainTomorrow)
+prop.table(GlmPredTable_Ave)
+```
+
+Glm Bagging without Selecting Indicators:
+```{r}
+GlmBaggingPred <- (rowMeans(AllGlmPred) > 0.5)
+GlmBaggingPredAccuracy <- mean(GlmBaggingPred == TestRainTomorrow)
+GlmBaggingPredAccuracy
+
+hist(AllGlmPredAccuracy)
+abline(v = GlmBaggingPredAccuracy, col = "red" )
+
+GlmBaggingPredTable <- table(GlmBaggingPred,TestRainTomorrow)
+GlmBaggingPredTable
+prop.table(GlmBaggingPredTable)
+```
+
+## 3.4. KNN
+Set k = 101, 201, 301 respectively
+Bagging using RandomTimes_KNN KNNs
+
+KNN Predict:
+```{r cache=TRUE, results='hide'}
+RemoveFactorVar <- function(Data){
+    Logical <- sapply(Data,is.factor)
+    Data <- Data[,!Logical]
+}
+
+set.seed(1)
+library(class)
+TestData_KNN <- RemoveFactorVar(TestData)
+TestData_KNN <- subset(TestData_KNN, select = -RISK_MM)
+
+K <- c(101,201,301)
+AllKNNPred <- list()
+RandomTimes_KNN <- 11
+for ( i in 1:length(K) ){
+    AllKNNPred[[i]] <- matrix(nrow = nrow(TestData_KNN), ncol = RandomTimes_KNN)
+}
+
+for ( i in 1:RandomTimes_KNN ){
+    TrainData <- GetTrainData(i)
+    TrainRainTommorrow <- TrainData$RainTomorrow
+    TrainData <- RemoveFactorVar(TrainData)
+    TrainData <- subset(TrainData, select = -RISK_MM)
+    
+    for ( j in 1:length(K) ){
+        KNNPred <- knn(TrainData,TestData_KNN,TrainRainTommorrow,k=K[j])
+        AllKNNPred[[j]][,i] <- (KNNPred == "Yes")
+    }
+    print(i)
+}
+```
+
+All KNN Accuracy and Performance:
+```{r}
+GetPredAccuracy <- function(AllModelPred,RealLabel){
+    PredAccuracy <- matrix(nrow = ncol(AllModelPred), ncol = 1)
+    for (i in 1:ncol(AllModelPred)){
+        PredAccuracy[i] <- mean(AllModelPred[,i]==RealLabel)
+    }
+    PredAccuracy
+}
+
+GetAvePfmTable <- function(AllModelPred,RealLabel){
+    Pred <- AllModelPred[,1]
+    PredTable_Ave <- table(Pred,RealLabel)
+    for (i in 2:ncol(AllModelPred)){
+        Pred <- AllModelPred[,i]
+        PredTable_Ave <- PredTable_Ave + table(Pred,RealLabel)
+    }
+    PredTable_Ave <- PredTable_Ave/ncol(AllModelPred)
+    PredTable_Ave
+}
+
+AllKNNPredAccuracy <- list()
+KNNPredTable_Ave <- list()
+for ( i in 1:length(K) ){
+    AllKNNPredAccuracy[[i]] <- GetPredAccuracy(AllKNNPred[[i]],TestRainTomorrow)
+    KNNPredTable_Ave[[i]] <- GetAvePfmTable(AllKNNPred[[i]],TestRainTomorrow)
+}
+KNNPredTable_Ave
+AllKNNPredAccuracy
+```
+
+KNN Bagging without Selecting Indicators:
+```{r}
+KNNBaggingPred <- matrix(nrow = length(TestRainTomorrow), ncol = length(AllKNNPred))
+KNNBaggingPredAccuracy <- matrix(nrow = length(AllKNNPred), ncol = 1)
+for ( i in 1:length(K) ){
+    KNNBaggingPred[,i] <- (rowMeans(AllKNNPred[[i]]) > 0.5)
+    KNNBaggingPredAccuracy[i] <- mean(KNNBaggingPred[,i] == TestRainTomorrow)
+}
+KNNBaggingPredAccuracy
+```
+
+## 3.5. Decision Tree and Random Forest
+Consider categorizing date into 4 seasons
+### 3.5.1. Train Decision Tree - Exclude Date, RISK_MM, Location
+```{r cache=TRUE, results='hide'}
+library(tree)
+AllDTree <- list()
+for (i in 1:RandomTimes){
+    TrainData <- GetTrainData(i)
+    TrainData <- subset(TrainData, select = -c(Date,Location,RISK_MM))
+    
+    DTree <- tree(RainTomorrow ~ ., data = TrainData)
+    AllDTree[[i]] <- DTree
+    print(paste0(as.character(i),"/",as.character(RandomTimes),"-Tree Train"))
+}
+```
+
+### 3.5.2. Decision Tree - Prediction
+```{r cache=TRUE, results='hide'}
+GetTreePredict <- function(AllDTree,TestData){
+    TreePredict <- matrix(nrow = nrow(TestData), ncol = length(AllDTree))
+    for (i in 1:length(AllDTree)){
+        Pred <- predict(AllDTree[[i]],TestData,type="class")
+        TreePredict[,i] <- (Pred == "Yes")
+        print(paste0(as.character(i),"/",as.character(length(AllDTree)),"-Predict"))
+    }
+    TreePredict
+}
+
+AllTreePred <- GetTreePredict(AllDTree,TestData)
+AllDTPredAccuracy <- GetPredAccuracy(AllTreePred,TestRainTomorrow)
+```
+
+Trees' prediction results are as below:
+```{r}
+hist(AllDTPredAccuracy)
+PredTable_Ave <- GetAvePfmTable(AllTreePred,TestRainTomorrow)
+prop.table(PredTable_Ave)
+```
+
+From the histogram, the prediction accuracy of all these trees are between 71% and 75%. The majority is below 73%. (Note that the testing dataset has balanced samples.) On average, if indeed it will rain tomorrow, the probability that trees make a wrong prediction is `r PredTable_Ave[1,2]/sum(PredTable_Ave[,2])` and if indeed it won't rain tomorrow, the probability that trees make a wrong prediction is `r PredTable_Ave[2,1]/sum(PredTable_Ave[,1])`.
+
+### 3.5.3. Bagging Without Selecting Indicators
+```{r}
+BaggingPred <- (rowMeans(AllTreePred) > 0.5)
+BaggingPredAccuracy <- mean(BaggingPred == TestRainTomorrow)
+BaggingPredAccuracy
+```
+
+Bagging's effect is as below:
+```{r}
+hist(AllDTPredAccuracy)
+abline(v = BaggingPredAccuracy, col = "red" )
+
+BaggingPredTable <- table(BaggingPred,TestRainTomorrow)
+BaggingPredTable
+prop.table(BaggingPredTable)
+```
+
+From the graph above, the red line, representing the prediction accuracy after bagging, locates on the right side of the histogram. With bagging, if indeed it will rain tomorrow, the probability that bagging-tree makes a wrong prediction is `r BaggingPredTable[1,2]/sum(BaggingPredTable[,2])` and if indeed it won't rain tomorrow, the probability that bagging-tree makes a wrong prediction is `r BaggingPredTable[2,1]/sum(BaggingPredTable[,1])`.
+
+Comparing these results with that of trees without bagging, bagging without selecting indicators seem to achieve an average prediction performance of all the trees.
+
+### 3.5.4 Train Decision Tree - Exclude Date, RISK_MM; Include Location
+It makes sense that a city's weather can depend on the loaction of the city, so location is included to train trees, with a hope that prediction accuracy can be improved.
+
+Since variable Location has 44 levels, so much for train decision trees that R cannot process, this variable is manually transfer to a 0-1 vector.
+```{r}
+ChangeLocation2Vector <- function(Data){
+    AllCity <- unique(Data$Location)
+    LocationMat <- sapply(AllCity,function(City){Data$Location==City})
+    LocationDataFrame <- as.data.frame(LocationMat)
+    names(LocationDataFrame) <- AllCity
+    Data <- cbind(Data,LocationDataFrame)
+    NewCols <- match(c("Location"),names(Data))
+    Data <- Data[,-NewCols]
+}
+```
+
+Training: 
+```{r cache=TRUE, results='hide'}
+AllDTree_IndLoc <- list()
+for (i in 1:RandomTimes){
+    TrainData <- GetTrainData(i)
+    TrainData <- ChangeLocation2Vector(TrainData)
+    NewCols <- match(c("Date","RISK_MM"),names(TrainData))
+    TrainData <- TrainData[,-NewCols]
+    
+    DTree <- tree(RainTomorrow ~ ., data = TrainData)
+    AllDTree_IndLoc[[i]] <- DTree
+    print(paste0(as.character(i),"/",as.character(RandomTimes),"-Tree Train"))
+}
+```
+
+Prediction:
+```{r cache=TRUE, results='hide'}
+TestData_IndLoc <- ChangeLocation2Vector(TestData)
+AllDTPred_IndLoc <- GetTreePredict(AllDTree_IndLoc,TestData_IndLoc)
+```
+
+Accuracy and Performance:
+```{r}
+AllDTPredAccuracy_IndLoc <- GetPredAccuracy(AllDTPred_IndLoc,TestRainTomorrow)
+hist(AllDTPredAccuracy_IndLoc)
+PredTableIndLoc_Ave <- GetAvePfmTable(AllDTPred_IndLoc,TestRainTomorrow)
+prop.table(PredTableIndLoc_Ave)
+```
+
+Bagging:
+```{r}
+BaggingPred_IndLoc <- (rowMeans(AllDTPred_IndLoc) > 0.5)
+BaggingPredIndLocAccuracy <- mean(BaggingPred_IndLoc == TestRainTomorrow)
+BaggingPredIndLocAccuracy
+
+hist(AllDTPredAccuracy_IndLoc)
+abline(v = BaggingPredIndLocAccuracy, col = "red" )
+
+BaggingPredIndLocTable <- table(BaggingPred_IndLoc,TestRainTomorrow)
+BaggingPredIndLocTable
+prop.table(BaggingPredIndLocTable)
+```
+
+### 3.5.5. Train Decision Tree - Exclude Location, RISK_MM; Include Date
+
+
+### 3.5.6. Random Forest - Prediction
+Train on the same TrainData as Tree
+```{r}
+library('randomForest')
+set.seed(1)
+AllForest <- list()
+for (i in 1:10){
+    TrainData <- GetTrainData(i)
+    TrainData <- subset(TrainData, select = -c(Date,Location,RISK_MM))
+    
+    Forest <-randomForest(RainTomorrow ~ ., data = TrainData, norm.votes=TRUE)
+    AllForest[[i]] <- Forest
+    print(paste0(as.character(i),"/",as.character(RandomTimes),"-Forest Train"))
+}
+plot(Forest)
+```
+
+Predict:
+```{r}
+GetForestPredict <- function(AllForest,TestData){
+    ForestPredict <- matrix(nrow = nrow(TestData), ncol = length(AllForest))
+    for (i in 1:length(AllForest)){
+        Pred <- predict(AllForest[[i]],TestData,type="class",norm.votes = TRUE)
+        ForestPredict[,i] <- (Pred == "Yes")
+        print(paste0(as.character(i),"/",as.character(length(AllForest)),"-Predict"))
+    }
+    ForestPredict
+}
+
+AllForestPred <- GetForestPredict(AllForest,TestData)
+```
+
+Accuracy and Performance:
+```{r}
+AllForestPredAccuracy <- GetPredAccuracy(AllForestPred,TestRainTomorrow)
+hist(AllForestPredAccuracy)
+AllForestPredTable_Ave <- GetAvePfmTable(AllForestPred,TestRainTomorrow)
+prop.table(AllForestPredTable_Ave)
+```
+
+Train with all data available for training:
+```{r}
+TrainData <- rbind(Yes_TrainCandidate,No_TrainCandidate)
+NewRows <- sample(1:nrow(TrainData),nrow(TrainData))
+TrainData <- TrainData[NewRows,]
+TrainData <- subset(TrainData, select = -c(Date,Location,RISK_MM))
+    
+Forest <-randomForest(RainTomorrow ~ ., data = TrainData, norm.votes=TRUE)
+ForestPred <- predict(Forest,TestData,type="class",norm.votes = TRUE)
+ForestPred <- (ForestPred == "Yes")
+
+ForestPredAccuracy <- mean(ForestPred==TestRainTomorrow)
+ForestPredAccuracy
+table(ForestPred,TestRainTomorrow)
+prop.table(table(ForestPred,TestRainTomorrow))
+```
+
+The accuracy is lower than that of the forests in the former part.
+
+Train on the largest balanced TrainData:
+```{r}
+set.seed(1)
+No_TrainRows <- sample(1:nrow(No_TrainCandidate),nrow(Yes_TrainCandidate))
+TrainData <- rbind(No_TrainCandidate[No_TrainRows,],Yes_TrainCandidate)
+NewRows <- sample(1:nrow(TrainData),nrow(TrainData))
+TrainData <- TrainData[NewRows,]
+TrainData <- subset(TrainData, select = -c(Date,Location,RISK_MM))
+
+Forest <-randomForest(RainTomorrow ~ ., data = TrainData, norm.votes=TRUE)
+ForestPred <- predict(Forest,TestData,type="class",norm.votes = TRUE)
+ForestPred <- (ForestPred == "Yes")
+
+ForestPredAccuracy <- mean(ForestPred==TestRainTomorrow)
+ForestPredAccuracy
+table(ForestPred,TestRainTomorrow)
+prop.table(table(ForestPred,TestRainTomorrow))
+```
+
+The prediction accuracy in this part is almost the same as in the first part in this section.
